@@ -21,6 +21,7 @@ using Google.Protobuf;
 using Grpc.Core;
 using System.Collections.Generic;
 using Xunit;
+using Google.Api.Gax;
 
 namespace GoogleCloudSamples
 {
@@ -30,8 +31,26 @@ namespace GoogleCloudSamples
         private readonly PublisherClient _publisher;
         private readonly SubscriberClient _subscriber;
         // [START retry]
-        private readonly int _retryCount = 3;
-        private readonly int _retryDelayMs = 500;
+        CallSettings newRetryCallSettings(int tryCount)
+        {
+            var backoff = new BackoffSettings()
+            {
+                Delay = TimeSpan.FromMilliseconds(500),
+                DelayMultiplier = 2
+            };
+            return new CallSettings()
+            {                
+                Timing = CallTiming.FromRetry(new RetrySettings()
+                {
+                    RetryBackoff = backoff,
+                    TimeoutBackoff = backoff,
+                    RetryFilter = (RpcException e) => (
+                        e.Status.StatusCode != StatusCode.AlreadyExists && --tryCount > 0),
+                    // TotalExpiration = Expiration.FromTimeout(TimeSpan.FromSeconds(10)),                     
+                    DelayJitter = RetrySettings.NoJitter,                    
+                })
+            };
+        }
         // [END retry]
 
         public PubsubTest()
@@ -200,53 +219,30 @@ namespace GoogleCloudSamples
         {
             string topicName = PublisherClient.FormatTopicName(_projectId, topicId);
             string subscriptionName =
-                SubscriberClient.FormatSubscriptionName(_projectId, subscriptionId);
-            var delayMs = _retryDelayMs;
-            for (int tries = 1; true; ++tries)
+            // Create Subscription.
+            SubscriberClient.FormatSubscriptionName(_projectId, subscriptionId);
+            try
             {
-                try
-                {
-                    // Subscribe to Topic
-                    // This may fail if the Subscription already exists or 
-                    // the Topic has not yet been created.
-                    subscriber.CreateSubscription(subscriptionName, topicName,
-                        pushConfig: null, ackDeadlineSeconds: 60);
-                    break;
-                }
-                catch (RpcException e) when (e.Status.StatusCode == StatusCode.AlreadyExists)
-                {
-                    break;
-                }
-                catch (RpcException) when (tries < _retryCount)
-                {
-                    System.Threading.Thread.Sleep(delayMs);
-                    delayMs *= 2;  // Exponential back-off.
-                }
-                catch (RpcException) when (tries == _retryCount)
-                {
-                    //Number of retries set in _retryCount has been reached
-                    break;
-                }
+                // Subscribe to Topic
+                // This may fail if the Subscription already exists or 
+                // the Topic has not yet been created.
+                subscriber.CreateSubscription(subscriptionName, topicName,
+                    pushConfig: null, ackDeadlineSeconds: 60,
+                    callSettings: newRetryCallSettings(3));
+            }
+            catch (RpcException e) when (e.Status.StatusCode == StatusCode.AlreadyExists)
+            {
+                // Already exists.  That's fine.
             }
 
             // Create Topic
-            delayMs = _retryDelayMs;
-            for (int tries = 1; true; ++tries)
+            try
             {
-                try
-                {
-                    publisher.CreateTopic(topicName);
-                    break;
-                }
-                catch (RpcException e) when (e.Status.StatusCode == StatusCode.AlreadyExists)
-                {
-                    break;
-                }
-                catch (RpcException) when (tries < 3)
-                {
-                    System.Threading.Thread.Sleep(delayMs);
-                    delayMs *= 2;  // Exponential back-off.
-                }
+                publisher.CreateTopic(topicName, newRetryCallSettings(3));
+            }
+            catch (RpcException e) when (e.Status.StatusCode == StatusCode.AlreadyExists)
+            {
+                // Already exists.  That's fine.
             }
         }
         // [END retry]
