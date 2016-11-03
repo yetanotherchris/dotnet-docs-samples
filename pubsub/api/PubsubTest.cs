@@ -31,12 +31,26 @@ namespace GoogleCloudSamples
         private readonly PublisherClient _publisher;
         private readonly SubscriberClient _subscriber;
         // [START retry]
-        CallSettings newRetryCallSettings(int tryCount)
+        /// <summary>
+        /// Creates new CallSettings that will retry an RPC that fails.
+        /// </summary>
+        /// <param name="tryCount">
+        /// How many times to try the RPC before giving up?
+        /// </param>
+        /// <param name="finalStatusCodes">
+        /// Which status codes should we *not* retry?
+        /// </param>
+        /// <returns>
+        /// A CallSettings instance.
+        /// </returns>
+        CallSettings newRetryCallSettings(int tryCount, 
+            params StatusCode[] finalStatusCodes)
         {
             var backoff = new BackoffSettings()
             {
                 Delay = TimeSpan.FromMilliseconds(500),
-                DelayMultiplier = 2
+                DelayMultiplier = 2,
+                MaxDelay = TimeSpan.FromSeconds(3)
             };
             return new CallSettings()
             {                
@@ -45,8 +59,9 @@ namespace GoogleCloudSamples
                     RetryBackoff = backoff,
                     TimeoutBackoff = backoff,
                     RetryFilter = (RpcException e) => (
-                        e.Status.StatusCode != StatusCode.AlreadyExists && --tryCount > 0),
-                    // TotalExpiration = Expiration.FromTimeout(TimeSpan.FromSeconds(10)),                     
+                        StatusCode.OK != e.Status.StatusCode
+                        && !finalStatusCodes.Contains(e.Status.StatusCode)
+                        && --tryCount > 0),
                     DelayJitter = RetrySettings.NoJitter,                    
                 })
             };
@@ -217,33 +232,41 @@ namespace GoogleCloudSamples
         public void RpcRetry(string topicId, string subscriptionId,
             PublisherClient publisher, SubscriberClient subscriber)
         {
-            string topicName = PublisherClient.FormatTopicName(_projectId, topicId);
+            string topicName = PublisherClient.FormatTopicName(_projectId,
+                topicId);
             string subscriptionName =
             // Create Subscription.
             SubscriberClient.FormatSubscriptionName(_projectId, subscriptionId);
+            // Create Topic
+            try
+            {
+                // This may fail if the Topic already exists.
+                // Don't retry in that case.
+                publisher.CreateTopic(topicName, newRetryCallSettings(3, 
+                    StatusCode.AlreadyExists));
+            }
+            catch (RpcException e) 
+            when (e.Status.StatusCode == StatusCode.AlreadyExists)
+            {
+                // Already exists.  That's fine.
+            }
             try
             {
                 // Subscribe to Topic
                 // This may fail if the Subscription already exists or 
-                // the Topic has not yet been created.
+                // the Topic has not yet been created.  In those cases, don't
+                // retry, because a retry would fail the same way.
                 subscriber.CreateSubscription(subscriptionName, topicName,
                     pushConfig: null, ackDeadlineSeconds: 60,
-                    callSettings: newRetryCallSettings(3));
+                    callSettings: newRetryCallSettings(3, StatusCode.AlreadyExists,
+                        StatusCode.NotFound));
             }
-            catch (RpcException e) when (e.Status.StatusCode == StatusCode.AlreadyExists)
+            catch (RpcException e) 
+            when (e.Status.StatusCode == StatusCode.AlreadyExists)
             {
                 // Already exists.  That's fine.
             }
 
-            // Create Topic
-            try
-            {
-                publisher.CreateTopic(topicName, newRetryCallSettings(3));
-            }
-            catch (RpcException e) when (e.Status.StatusCode == StatusCode.AlreadyExists)
-            {
-                // Already exists.  That's fine.
-            }
         }
         // [END retry]
 
